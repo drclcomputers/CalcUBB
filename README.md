@@ -55,7 +55,7 @@ calcubb -v
 ### Comenzi în Program
 - **Tab/N**: Următoarea întrebare
 - **Shift+Tab/P**: Întrebarea anterioară
-- **Săgeți/WASD**: Navigare între opțiuni
+- **Săgeți**: Navigare între opțiuni
 - **Space/A**: Selectare/deselectare răspuns
 - **Enter**: Calculează punctajul
 - **Q**: Ieșire
@@ -75,5 +75,6 @@ Sau descărcați executabilul direct din secțiunea Releases.
 - Terminal cu suport pentru TUI (Text User Interface)
 
 ## Licență
+
 
 Acest proiect este licențiat sub termenii [Licenței MIT](LICENSE).
