@@ -6,7 +6,7 @@
 /*
 Algoritm pentru calculul notei la admiterea la Facultatea de Matematica si Informatica:
 - Fiecare întrebare poate avea 1 sau mai multe răspunsuri corecte.
-- Fiecare întrebare are asociat un punctaj „p” care este primit de către candidat daca bifează toate răspunsurile corecte si numai pe acestea.
+- Fiecare întrebare are asociat un punctaj „p” care este primit de candidat daca bifează toate răspunsurile corecte si numai pe acestea.
 - Daca o întrebare are asociat un punctaj „p” si are un număr de „t” răspunsuri corecte si un număr de „f” răspunsuri incorecte, atunci:
     > Daca unul dintre cele „t” răspunsuri corecte este bifat, atunci candidatul primește „p/t” puncte pentru acel raspuns
     > Daca unul dintre cele „f” răspunsuri incorecte este bifat, atunci candidatul primește „(-0.66)*p/t” puncte (adică este penalizat) pentru acel raspuns.
@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strconv"
@@ -32,13 +33,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "v25.09"
+const (
+	VER         = "v25.09.1"
+	maxFileSize = 1024 * 1024 // 1MB limită pentru fișiere
+)
 
 type state int
 
 const (
 	askNumProblems state = iota
 	inputAnswers
+	confirmCalculation
 	showResult
 )
 
@@ -90,12 +95,32 @@ func (m model) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+func (m model) validateAnswers() error {
+	for i, ans := range m.answers {
+		correctCount := 0
+		for _, isCorrect := range ans.correct {
+			if isCorrect {
+				correctCount++
+			}
+		}
+		if correctCount == 0 {
+			return fmt.Errorf("Întrebarea %d nu are niciun răspuns marcat ca fiind corect", i+1)
+		}
+		if correctCount > 3 {
+			return fmt.Errorf("Întrebarea %d are prea multe răspunsuri marcate ca fiind corecte (maxim 3 permise)", i+1)
+		}
+	}
+	return nil
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.state {
 	case askNumProblems:
 		return m.updateNumProblems(msg)
 	case inputAnswers:
 		return m.updateInputAnswers(msg)
+	case confirmCalculation:
+		return m.updateConfirmCalculation(msg)
 	case showResult:
 		return m.updateShowResult(msg)
 	}
@@ -112,14 +137,13 @@ func (m model) updateNumProblems(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			num, err := strconv.Atoi(m.numInput.Value())
 			if err != nil || num > 90 || num < 1 {
-				m.err = fmt.Errorf("Introdu un numar <=90 && >=10!")
+				m.err = fmt.Errorf("Introdu un numar <=90 si >=1!")
 				return m, nil
 			}
+			m.err = nil
 			m.numProblems = num
-			m.pPerProblem = 3.75
-			if num != 24 {
-				m.pPerProblem = float64(90) / float64(num)
-			}
+			m.pPerProblem = float64(90) / float64(num)
+
 			m.answers = make([]answer, num)
 			for i := range m.answers {
 				m.answers[i] = answer{
@@ -158,7 +182,7 @@ func (m model) updateInputAnswers(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "right", ">", "l", "L":
 			m.focusedIndex = (m.focusedIndex + 1) % 4
 			return m, nil
-		case " ", "a", "A":
+		case " ", "a", "A", "x", "X":
 			if m.focusedGroup == 0 {
 				m.correctItems[m.focusedIndex].selected = !m.correctItems[m.focusedIndex].selected
 			} else {
@@ -197,12 +221,12 @@ func (m model) updateInputAnswers(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			m.saveCurrentAnswers()
-			total, reports := m.calculateTotalScore()
-			m.result = resultState{
-				totalScore: total,
-				reports:    reports,
+			if err := m.validateAnswers(); err != nil {
+				m.err = err
+				return m, nil
 			}
-			m.state = showResult
+			m.err = nil
+			m.state = confirmCalculation
 			return m, nil
 		}
 	}
@@ -267,6 +291,27 @@ func (m model) calculateQuestionScore(qNum int, ans answer) questionReport {
 
 	letters := []string{"A", "B", "C", "D"}
 
+	allMarked := true
+	for _, marked := range ans.marked {
+		if !marked {
+			allMarked = false
+			break
+		}
+	}
+
+	// Dacă toate răspunsurile sunt bifate, returnează scor 0
+	if allMarked {
+		report.score = 0
+		report.markedAnswers = []string{"A", "B", "C", "D"}
+		for _, c := range letters {
+			if c != "" {
+				report.correctAnswers = append(report.correctAnswers, c)
+			}
+		}
+		report.incorrectCount = 4
+		return report
+	}
+
 	t := 0.0
 	for i, c := range ans.correct {
 		if c {
@@ -322,10 +367,30 @@ func createCheckboxItems() []checkboxItem {
 }
 
 var (
-	checkboxStyle = lipgloss.NewStyle().Padding(0, 1)
-	focusedStyle  = lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("69"))
-	inactiveStyle = lipgloss.NewStyle().Padding(0, 1)
+	checkboxStyle      = lipgloss.NewStyle().Padding(0, 1)
+	focusedStyle       = lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("69"))
+	inactiveStyle      = lipgloss.NewStyle().Padding(0, 1)
+	correctStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // Verde pentru răspunsuri corecte
+	incorrectStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // Roșu pentru răspunsuri greșite
+	highlightStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // Galben pentru evidențiere
+	progressFilledChar = "■"
+	progressEmptyChar  = "□"
 )
+
+func (m model) renderProgressBar(width int) string {
+	if width > 45 {
+		width = 45
+	}
+
+	filled := int(float64(m.problemIndex+1) / float64(m.numProblems) * float64(width))
+	if filled > width {
+		filled = width
+	}
+	empty := width - filled
+
+	bar := strings.Repeat(progressFilledChar, filled) + strings.Repeat(progressEmptyChar, empty)
+	return fmt.Sprintf("[%s] %d/%d", bar, m.problemIndex+1, m.numProblems)
+}
 
 func (m model) renderCheckbox(items []checkboxItem, focused bool, focusedIndex int) string {
 	var s []string
@@ -340,12 +405,32 @@ func (m model) renderCheckbox(items []checkboxItem, focused bool, focusedIndex i
 	return lipgloss.JoinHorizontal(lipgloss.Left, s...)
 }
 
+func (m model) updateConfirmCalculation(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "y", "Y", "d", "D":
+			total, reports := m.calculateTotalScore()
+			m.result = resultState{
+				totalScore: total,
+				reports:    reports,
+			}
+			m.state = showResult
+			return m, nil
+		case "n", "N", "esc":
+			m.state = inputAnswers
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
 func (m model) View() string {
 	var b strings.Builder
 
 	switch m.state {
 	case askNumProblems:
-		b.WriteString("Calculator pentru punctajul de la examenul de admitere UBB (info si mate) - v 25.09\n\n")
+		b.WriteString(fmt.Sprintf("Calculator pentru punctajul de la examenul de admitere UBB (info si mate) - %s\n\n", VER))
 		b.WriteString("Introdu numărul de probleme (24 sau 30): ")
 		b.WriteString(m.numInput.View())
 		if m.err != nil {
@@ -353,12 +438,22 @@ func (m model) View() string {
 		}
 		b.WriteString("\n\n\nApasă Enter pentru a continua, Q sau Ctrl+C pentru ieșire.")
 	case inputAnswers:
+		b.WriteString(fmt.Sprintf("Progres: %s\n", m.renderProgressBar(m.numProblems)))
 		b.WriteString(fmt.Sprintf("Întrebarea %d/%d (p=%.2f puncte per pb)\n", m.problemIndex+1, m.numProblems, m.pPerProblem))
 		b.WriteString("Barem (corecte):\n")
 		b.WriteString(m.renderCheckbox(m.correctItems, m.focusedGroup == 0, m.focusedIndex))
 		b.WriteString("\n\nRăspunsuri bifate:\n")
 		b.WriteString(m.renderCheckbox(m.markedItems, m.focusedGroup == 1, m.focusedIndex))
-		b.WriteString("\n\nComenzi:\n >Up/Down pentru scrolare intre raspunsuri corecte/bifate\n >Stânga(<)/Dreapta(>) pentru selecție\n >Space/A pentru bifare\n >Tab(N)/Shift+Tab(P) pentru următoarea/precedenta intrebare\n >Enter pentru calcul\n >Q pentru ieșire")
+		if m.err != nil {
+			b.WriteString(fmt.Sprintf("\n\nEroare: %v", m.err))
+		}
+		b.WriteString("\n\nComenzi:\n > Up/Down pentru scrolare intre raspunsuri corecte/bifate\n > Stânga(<)/Dreapta(>) pentru selecție\n > Space/A/X pentru bifare\n > Tab(N)/Shift+Tab(P) pentru următoarea/precedenta intrebare\n > Enter pentru calcul\n > Q pentru ieșire")
+	case confirmCalculation:
+		b.WriteString("\n\n╔════════════════════════════════════════════╗\n")
+		b.WriteString("║  Dorești să calculezi nota finală? (Y/N)   ║\n")
+		b.WriteString("╚════════════════════════════════════════════╝\n\n")
+		b.WriteString("Y/D - Da, calculează nota\n")
+		b.WriteString("N/ESC - Înapoi la editare")
 	case showResult:
 		report := m.result.reports[m.resultIndex]
 
@@ -367,14 +462,43 @@ func (m model) View() string {
 		b.WriteString("──────────────────────────────────────────────────\n")
 
 		b.WriteString(fmt.Sprintf("Întrebarea %d:\n", report.questionNum))
-		b.WriteString(fmt.Sprintf("  Răspunsuri corecte: %s\n", strings.Join(report.correctAnswers, ", ")))
+		b.WriteString(fmt.Sprintf("  Răspunsuri corecte: %s\n", correctStyle.Render(strings.Join(report.correctAnswers, ", "))))
 		if len(report.markedAnswers) > 0 {
-			b.WriteString(fmt.Sprintf("  Răspunsuri bifate: %s\n", strings.Join(report.markedAnswers, ", ")))
+			markedAnswersText := report.markedAnswers
+			for i, ans := range report.markedAnswers {
+				found := false
+				for _, correct := range report.correctAnswers {
+					if ans == correct {
+						found = true
+						break
+					}
+				}
+				if found {
+					markedAnswersText[i] = correctStyle.Render(ans)
+				} else {
+					markedAnswersText[i] = incorrectStyle.Render(ans)
+				}
+			}
+			b.WriteString(fmt.Sprintf("  Răspunsuri bifate: %s\n", strings.Join(markedAnswersText, ", ")))
 		} else {
 			b.WriteString("  Răspunsuri bifate: (niciun răspuns bifat)\n")
 		}
-		b.WriteString(fmt.Sprintf("  Răspunsuri corecte: %d | Răspunsuri greșite: %d\n", report.correctCount, report.incorrectCount))
-		b.WriteString(fmt.Sprintf("  Punctaj: %.2f / %.2f\n", report.score, report.maxScore))
+		b.WriteString("  Statistică: ")
+		if report.correctCount > 0 {
+			b.WriteString(correctStyle.Render(fmt.Sprintf("%d răspunsuri corecte", report.correctCount)))
+		}
+		if report.incorrectCount > 0 {
+			if report.correctCount > 0 {
+				b.WriteString(" | ")
+			}
+			b.WriteString(incorrectStyle.Render(fmt.Sprintf("%d răspunsuri greșite", report.incorrectCount)))
+		}
+		b.WriteString("\n")
+		scoreStyle := incorrectStyle
+		if report.score > report.maxScore*0.5 {
+			scoreStyle = correctStyle
+		}
+		b.WriteString(fmt.Sprintf("  Punctaj: %s\n", scoreStyle.Render(fmt.Sprintf("%.2f / %.2f", report.score, report.maxScore))))
 		b.WriteString("\n──────────────────────────────────────────────────\n")
 
 		if m.resultIndex > 0 {
@@ -396,12 +520,34 @@ func (m model) View() string {
 }
 
 func readAnswersFromFile(filename string) ([]answer, int, error) {
+	fileInfo, err := os.Stat(filename)
+	if err != nil {
+		if os.IsPermission(err) {
+			return nil, 0, fmt.Errorf("Nu ai permisiunea de a accesa fișierul: %v", err)
+		}
+		if os.IsNotExist(err) {
+			return nil, 0, fmt.Errorf("Fișierul nu există: %v", err)
+		}
+		return nil, 0, fmt.Errorf("Nu pot accesa fișierul: %v", err)
+	}
+
+	if fileInfo.Size() > maxFileSize {
+		return nil, 0, fmt.Errorf("Fișierul este prea mare (limită: 1MB)")
+	}
+
 	file, err := os.Open(filename)
 	if err != nil {
-		return nil, 0, fmt.Errorf("Nu pot deschide fisierul: %v", err)
+		return nil, 0, fmt.Errorf("Nu pot deschide fișierul: %v", err)
 	}
 	defer file.Close()
 
+	buffer := make([]byte, 512)
+	_, err = file.Read(buffer)
+	if err != nil && err != io.EOF {
+		return nil, 0, fmt.Errorf("Eroare la citirea fișierului: %v", err)
+	}
+
+	file.Seek(0, 0)
 	scanner := bufio.NewScanner(file)
 
 	if !scanner.Scan() {
@@ -410,7 +556,7 @@ func readAnswersFromFile(filename string) ([]answer, int, error) {
 
 	text := scanner.Text()
 	numProblems, err := strconv.Atoi(strings.TrimSpace(text))
-	if err != nil || (strings.Contains(text, "0") && strings.Contains(text, "1") && !strings.Contains(text, "10") && strings.Contains(text, "A") && strings.Contains(text, "F") && strings.Contains(text, "a") && strings.Contains(text, "f")) {
+	if err != nil || (strings.Contains(text, "0") && strings.Contains(text, "1") && !strings.Contains(text, "10")) {
 		return nil, 0, fmt.Errorf("Prima linie trebuie sa contina numarul de probleme!")
 	}
 
@@ -432,12 +578,15 @@ func readAnswersFromFile(filename string) ([]answer, int, error) {
 		answers[i].marked = make([]bool, 4)
 
 		for j, char := range line {
-			if char != '0' && char != '1' && char != 'A' && char != 'F' && char != 'a' && char != 'f' {
-				return nil, 0, fmt.Errorf("Linia %d contine caractere invalide (doar 0 sau 1 sunt permise)", lineNum)
-			}
-			if char == '1' || char == 'A' || char == 'a' {
-				answers[i].correct[j] = true
-				correctCount++
+			if char == '0' || char == '1' {
+				if char == '1' {
+					answers[i].correct[j] = true
+					correctCount++
+				}
+			} else if strings.ContainsRune("AaFf", char) {
+				return nil, 0, fmt.Errorf("Linia %d: Detectat caracter hexadecimal '%c'. Folosește doar 0 sau 1", lineNum, char)
+			} else {
+				return nil, 0, fmt.Errorf("Linia %d: Caracter invalid '%c'. Doar 0 sau 1 sunt permise", lineNum, char)
 			}
 		}
 
@@ -457,7 +606,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("Calculator punctaj UBB %s\n", version)
+		fmt.Printf("Calculator punctaj UBB %s\n", VER)
 		return
 	}
 
